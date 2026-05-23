@@ -19,12 +19,13 @@ class IssueSeverity(Enum):
 
 
 class IssueCode:
-    UNSAFE_OPERATOR      = Property("UNSAFE_OPERATOR", 1)
-    FORMAT_MISMATCH      = Property("FORMAT_MISMATCH", 2)
-    INVALID_HEADER       = Property("INVALID_HEADER", 3)
-    JSON_PARSING_FAILED  = Property("JSON_PARSING_FAILED", 4)
-    SUSPICIOUS_PATTERN   = Property("SUSPICIOUS_PATTERN", 5)
-    INVALID_ENCODING     = Property("INVALID_ENCODING", 6)
+    UNSAFE_OPERATOR = Property("UNSAFE_OPERATOR", 1)
+    FORMAT_MISMATCH = Property("FORMAT_MISMATCH", 2)
+    INVALID_HEADER = Property("INVALID_HEADER", 3)
+    JSON_PARSING_FAILED = Property("JSON_PARSING_FAILED", 4)
+    SUSPICIOUS_PATTERN = Property("SUSPICIOUS_PATTERN", 5)
+    INVALID_ENCODING = Property("INVALID_ENCODING", 6)
+    LAYOUT_VIOLATION = Property("LAYOUT_VIOLATION", 7)
 
 
 class IssueDetails(metaclass=abc.ABCMeta):
@@ -101,6 +102,8 @@ class Issue:
             issue_description = "Suspicious pattern"
         elif self.code.value == IssueCode.INVALID_ENCODING.value:
             issue_description = "Invalid encoding"
+        elif self.code.value == IssueCode.LAYOUT_VIOLATION.value:
+            issue_description = "Layout violation"
         else:
             logger.error("No issue description for issue code %s", self.code)
 
@@ -173,6 +176,7 @@ class OperatorIssueDetails(IssueDetails):
     def __repr__(self) -> str:
         return f"<OperatorIssueDetails(module={self.module}, operator={self.operator}, severity={self.severity.name}, source={str(self.source)})>"
 
+
 class FormatIssueDetails(IssueDetails):
     def __init__(
         self,
@@ -206,8 +210,10 @@ class FormatIssueDetails(IssueDetails):
         }
 
     def __repr__(self) -> str:
-        return (f"<FormatIssueDetails(module={self.module}, detected_format={self.detected_format}, "
-                f"severity={self.severity.name}, source={str(self.source)})>")
+        return (
+            f"<FormatIssueDetails(module={self.module}, detected_format={self.detected_format}, "
+            f"severity={self.severity.name}, source={str(self.source)})>"
+        )
 
 
 class JSONParsingIssueDetails(IssueDetails):
@@ -227,7 +233,7 @@ class JSONParsingIssueDetails(IssueDetails):
     def output_lines(self) -> List[str]:
         return [
             f"Description: JSON parsing failed with error: {self.error}",
-            f"Source: {str(self.source)}"
+            f"Source: {str(self.source)}",
         ]
 
     def output_json(self) -> Dict[str, str]:
@@ -239,8 +245,10 @@ class JSONParsingIssueDetails(IssueDetails):
         }
 
     def __repr__(self) -> str:
-        return (f"<JSONParsingIssueDetails(error={self.error}, "
-                f"severity={self.severity.name}, source={str(self.source)})>")
+        return (
+            f"<JSONParsingIssueDetails(error={self.error}, "
+            f"severity={self.severity.name}, source={str(self.source)})>"
+        )
 
 
 class SuspiciousPatternIssueDetails(IssueDetails):
@@ -260,7 +268,7 @@ class SuspiciousPatternIssueDetails(IssueDetails):
     def output_lines(self) -> List[str]:
         return [
             f"Description: Suspicious pattern '{self.pattern}' detected in file.",
-            f"Source: {str(self.source)}"
+            f"Source: {str(self.source)}",
         ]
 
     def output_json(self) -> Dict[str, str]:
@@ -273,8 +281,10 @@ class SuspiciousPatternIssueDetails(IssueDetails):
         }
 
     def __repr__(self) -> str:
-        return (f"<SuspiciousPatternIssueDetails(pattern={self.pattern}, "
-                f"severity={self.severity.name}, source={str(self.source)})>")
+        return (
+            f"<SuspiciousPatternIssueDetails(pattern={self.pattern}, "
+            f"severity={self.severity.name}, source={str(self.source)})>"
+        )
 
 
 class InvalidEncodingIssueDetails(IssueDetails):
@@ -294,7 +304,7 @@ class InvalidEncodingIssueDetails(IssueDetails):
     def output_lines(self) -> List[str]:
         return [
             f"Description: File encoding is invalid: {self.error}",
-            f"Source: {str(self.source)}"
+            f"Source: {str(self.source)}",
         ]
 
     def output_json(self) -> Dict[str, str]:
@@ -306,5 +316,65 @@ class InvalidEncodingIssueDetails(IssueDetails):
         }
 
     def __repr__(self) -> str:
-        return (f"<InvalidEncodingIssueDetails(error={self.error}, "
-                f"severity={self.severity.name}, source={str(self.source)})>")
+        return (
+            f"<InvalidEncodingIssueDetails(error={self.error}, "
+            f"severity={self.severity.name}, source={str(self.source)})>"
+        )
+
+
+class LayoutIssueDetails(IssueDetails):
+    """Structural / layout issue in a safetensors file.
+
+    Covers the polyglot-defense findings (gap, overlap, trailing bytes,
+    gap-at-start) and other per-tensor structural errors (size mismatch,
+    unknown dtype, oversized shape). These are integrity problems, not
+    code-execution risks — kept separate from UNSAFE_OPERATOR so the
+    downstream report can label them correctly.
+    """
+
+    def __init__(
+        self,
+        module: str,
+        kind: str,
+        tensor_name: str,
+        detail: str,
+        severity: IssueSeverity,
+        source: Union[Path, str],
+        scanner: str = "",
+    ) -> None:
+        super().__init__(scanner)
+        self.module = module
+        self.kind = kind
+        self.tensor_name = tensor_name
+        self.detail = detail
+        # `operator` is reused as the dedup key (Issue.__eq__/__hash__).
+        self.operator = f"{kind}: {tensor_name}" if tensor_name else kind
+        self.source = source
+        self.severity = severity
+        self.scanner = scanner
+
+    def output_lines(self) -> List[str]:
+        return [
+            f"Description: {self.detail}",
+            f"Kind: {self.kind}",
+            f"Tensor: {self.tensor_name or '-'}",
+            f"Source: {str(self.source)}",
+        ]
+
+    def output_json(self) -> Dict[str, str]:
+        return {
+            "description": self.detail,
+            "kind": self.kind,
+            "tensor": self.tensor_name,
+            "module": self.module,
+            "operator": self.operator,
+            "source": str(self.source),
+            "scanner": self.scanner,
+            "severity": self.severity.name,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<LayoutIssueDetails(kind={self.kind}, tensor={self.tensor_name}, "
+            f"severity={self.severity.name}, source={str(self.source)})>"
+        )
